@@ -26,7 +26,7 @@ import os
 import json
 import re
 import time
-from typing import Any, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
@@ -36,6 +36,8 @@ from signaloid_utilities.c0sd.interface import (
     C0microSDPlusInterface,
     C0SDInterface,
     UnsupportedConfigureAction,
+    SoCRunning,
+    identity_tag_is_blank,
 )
 
 APP_VERSION = "2.5"  # Application version
@@ -61,6 +63,16 @@ class _C0SDToolkitMixin:
     to form a concrete `*Toolkit` class.
     """
 
+    if TYPE_CHECKING:
+        # Supplied by the variant interface this mixin is combined with.
+        BITSTREAM_OFFSET: int
+        OTP_OFFSET: Optional[int]
+
+        def read_flash(self, offset: int, size: int) -> bytes: ...
+        def write_flash(self, offset: int, data: bytes) -> int: ...
+        def read_otp(self, offset: int, size: int) -> bytes: ...
+        def soc_is_running(self) -> bool: ...
+
     def _strip_trailing_bytes(
             self, byte_array: bytearray, byte: int
             ) -> bytearray:
@@ -79,9 +91,9 @@ class _C0SDToolkitMixin:
                 end="",
                 flush=True
             )
-            self._write(flash_offset, file_data)
+            self.write_flash(flash_offset, file_data)
             print("Verifying...")
-            data_to_verify = self._read(flash_offset, input_file_bytes)
+            data_to_verify = self.read_flash(flash_offset, input_file_bytes)
             if data_to_verify == file_data:
                 print("Success: The data matches.")
                 return True
@@ -180,45 +192,114 @@ def _toolkit_cls_for(variant: str) -> Type[C0SDBaseInterface]:
     return TOOLKIT_BY_VARIANT[variant]
 
 
-# Any variant works to read the metadata prefix: it lives at the same
-# offset (and within the first 4 KiB, which stays readable even when the
-# bitstream section is locked) on every variant.
-_PROBE_VARIANT = "C0-microSD+"
+class IdentityMismatch(Exception):
+    """The capacity and the identity tag disagree about which device this is."""
+
+
+def _variant_by_tag() -> dict[bytes, str]:
+    """Identity tag bytes -> variant name."""
+    return {
+        cls.IDENTITY_TAG: name
+        for name, cls in TOOLKIT_BY_VARIANT.items()
+        if cls.IDENTITY_TAG is not None
+    }
 
 
 def _detect_variant(
     target_device: str, regmap_path: Optional[str]
 ) -> Optional[str]:
-    """Identify the compute module from the device's bitstream prefix.
+    """Identify the compute module, preferring the on-device identity tag.
 
-    Reads ``compute_module_type`` from the on-device bitstream metadata via
-    a short-lived probe interface (closed before returning, so it never
-    overlaps the real toolkit).
+    Order is capacity first, then the tag:
 
-    Returns the matching variant name, or None when the device is readable
-    but carries no identifiable Signaloid metadata (missing framing, no
-    JSON prefix, or an unknown value). Genuine device-access errors
-    (PermissionError, FileNotFoundError, OSError, ...) propagate so the caller 
-    surfaces the real cause and exit code.
+      1. read the advertised block-device capacity;
+      2. find the variant whose regmap says it advertises that capacity;
+      3. read the identity tag at that variant's own address;
+      4. require the two to agree.
+
+    Taking the capacity first means the tag is only ever read at *this*
+    device's address, so we never probe the other variant's -- which matters:
+    the C0-SD's tag address is past the end of a C0-microSD+ (the kernel
+    rejects that), and the C0-microSD+'s lands inside the C0-SD's PSRAM window.
+
+    Unlike the bitstream prefix this works with the SoC core RUNNING, which is
+    the point -- the flash access gate answers the prefix with zeros.
+
+    Returns the variant name, or None when the device carries no identity tag
+    and no decodable metadata. Raises IdentityMismatch when the two signals
+    disagree, or the tag is present but unrecognised. Device errors propagate.
     """
-    probe = _toolkit_cls_for(_PROBE_VARIANT)(
-        target_device, regmap_path=regmap_path
-    )
+    # One probe per variant: the addresses come from each variant's regmap via
+    # its __init__, so they are instance attributes like every other offset.
+    probes = {
+        name: cls(target_device, regmap_path=regmap_path)
+        for name, cls in TOOLKIT_BY_VARIANT.items()
+    }
     try:
-        meta = probe.read_bitstream_metadata(probe.BITSTREAM_OFFSET)
-    except ValueError:
-        # Device is readable but has no decodable Signaloid metadata.
+        any_probe = next(iter(probes.values()))
+        capacity = any_probe.device.capacity_bytes()
+
+        matched = [
+            name for name, probe in probes.items()
+            if probe.EXPECTED_CAPACITY_BYTES == capacity
+        ]
+        from_capacity = matched[0] if len(matched) == 1 else None
+
+        tag: Optional[bytes] = None
+        identity_offset = 0
+        if from_capacity is not None:
+            identity_offset = probes[from_capacity].IDENTITY_OFFSET
+            tag = probes[from_capacity].read_identity_tag()
+
+        if tag is not None and not identity_tag_is_blank(tag):
+            from_tag = _variant_by_tag().get(tag)
+            if from_tag is None:
+                # Tags are matched exactly, so an unknown-but-valid future tag
+                # is indistinguishable from junk. Print the bytes, or a new
+                # variant is undiagnosable from the error alone.
+                raise IdentityMismatch(
+                    f"unrecognised device identity tag {tag!r} at "
+                    f"0x{identity_offset:08X}. This toolkit may predate the "
+                    "device."
+                )
+            if from_tag != from_capacity:
+                raise IdentityMismatch(
+                    f"the device advertises {capacity} bytes, which is "
+                    f"{from_capacity}, but its identity tag {tag!r} says "
+                    f"{from_tag}. Refusing to guess: check the flashed "
+                    "bitstream matches the board."
+                )
+            return from_tag
+
+        # No tag: either a bitstream predating the identity register, or a
+        # capacity we do not recognise. Fall back to the metadata prefix,
+        # which only works with the core stopped.
+        print(
+            "Note: no device identity tag found; falling back to the bitstream "
+            "metadata prefix, which requires the SoC core to be stopped.",
+            file=sys.stderr,
+        )
+        try:
+            meta = any_probe.read_bitstream_metadata(any_probe.BITSTREAM_OFFSET)
+        except SoCRunning:
+            print(
+                "      ...and the core is running, so the prefix reads as "
+                "zeros. Pass --variant to identify the device explicitly.",
+                file=sys.stderr,
+            )
+            return None
+        except ValueError:
+            return None
+        declared = meta.get("compute_module_type")
+        if declared in TOOLKIT_BY_VARIANT:
+            return str(declared)
         return None
     finally:
-        try:
-            probe.device.close()
-        except Exception:
-            pass
-    # `meta` is the fully-decoded JSON object; the variant is looked up by
-    # key, never by byte offset, so detection is independent of the order
-    # or position of fields (future bitstream revisions may reorder keys).
-    declared = meta.get("compute_module_type")
-    return declared if declared in TOOLKIT_BY_VARIANT else None
+        for probe in probes.values():
+            try:
+                probe.device.close()
+            except Exception:
+                pass
 
 
 def _resolve_variant(args) -> str:
@@ -338,7 +419,14 @@ def open_and_pad_file(input_file: str, pad_size: Optional[int]):
 
 def _exit_for_exception(e: Exception) -> None:
     print(f"{e}\nAn error occurred, aborting.", file=sys.stderr)
-    if isinstance(e, ValueError):
+    if isinstance(e, SoCRunning):
+        # Not a fault: the device is fine, the caller just asked for
+        # something that needs the core stopped. Distinct code so scripts can
+        # tell "stop the core and retry" from a real I/O failure.
+        exit(os.EX_TEMPFAIL)
+    elif isinstance(e, IdentityMismatch):
+        exit(os.EX_DATAERR)
+    elif isinstance(e, ValueError):
         exit(os.EX_DATAERR)
     elif isinstance(e, FileNotFoundError):
         exit(os.EX_NOINPUT)
@@ -351,11 +439,32 @@ def _exit_for_exception(e: Exception) -> None:
 def handle_info(args):
     try:
         toolkit = _make_toolkit(args)
-        toolkit.print_device_identity()
-        print("Reading bitstream:")
-        toolkit.print_bitstream_information(
-            toolkit.BITSTREAM_OFFSET, raw=args.raw
-        )
+
+        # Everything below this point reads the SPI flash or the OTP, both of
+        # which the access gate answers with zeros while the core runs.
+        stopped_here = False
+        if toolkit.soc_is_running():
+            if not getattr(args, "stop_core", False):
+                raise SoCRunning("read the device information")
+            print("Stopping the SoC core (--stop-core)...")
+            toolkit.apply_configure_action("core-stop")
+            time.sleep(0.5)
+            stopped_here = True
+
+        try:
+            toolkit.print_device_identity()
+            print("Reading bitstream:")
+            toolkit.print_bitstream_information(
+                toolkit.BITSTREAM_OFFSET, raw=args.raw
+            )
+        finally:
+            # Restart in a finally: if the read fails halfway we still hand the
+            # device back in the state we found it, rather than silently
+            # leaving someone's application stopped.
+            if stopped_here:
+                print("Restarting the SoC core...")
+                toolkit.apply_configure_action("core-start")
+
         print("Done.")
         exit(os.EX_OK)
     except Exception as e:
@@ -535,6 +644,13 @@ def create_parser(selected_variant: Optional[str] = None):
         "--raw",
         action="store_true",
         help="Print the raw JSON metadata object instead of labelled fields."
+    )
+    p_info.add_argument(
+        "--stop-core",
+        action="store_true",
+        help="Stop the SoC core for the duration of the read, then restart it. "
+             "Without this, reading a device whose core is running is refused. "
+             "The flash and OTP would read back as zeros."
     )
     p_info.set_defaults(func=handle_info)
 

@@ -1,4 +1,4 @@
-#   Copyright (c) 2025, Signaloid.
+#   Copyright (c) 2026, Signaloid.
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -19,53 +19,43 @@
 #   DEALINGS IN THE SOFTWARE.
 
 
-try:
-    from typing import List, Union
-except:
-    pass
+class SDOverSPITransportMixin:
+    """SD-over-SPI transport for the C0-SD device family.
 
-from busio import SPI
-from microcontroller import Pin
-
-from c0microsd.sd_interface import C0microSDSignaloidSoCInterface
-from c0microsd.sd_protocol import SDOverSPI
-
-
-class C0microSDSignaloidSoCInterfaceSDSPI(C0microSDSignaloidSoCInterface):
-    """Communication interface for C0-microSD over SPI.
-
-    This class provides basic functionality for interfacing with the
-    Signaloid C0-microSD through the SD SPI interface.
+    Carries register I/O over SD block transfers. Must be listed before the
+    shared interface class in the bases.
     """
 
-    def __init__(self, spi: SPI, cs_pin: Pin, timeout: int, force_transactions: bool = False) -> None:
-        self.sd: SDOverSPI = SDOverSPI(
-            spi=spi,
-            cs_pin=cs_pin,
-            timeout=timeout
-        )
+    def _open_device(self, target_device: str) -> None:
+        """Return no block-device handle; the transport is SD-over-SPI."""
+        return None
 
-        super().__init__(
-            target_device="",
-            force_transactions=force_transactions
-        )
+    def _read(self, offset: int, size: int) -> bytes:
+        """Reads data from the compute module.
 
-    def _read(self, offset: int, bytes: int) -> bytes:
-        """Reads data from the C0-microSD.
-
+        :param offset: The byte offset to read from.
+        :param size: The number of bytes to read.
         :return: The read buffer
         """
-        if bytes % 512 == 0:
-            num_blocks = bytes // 512
+        if size % 512 == 0:
+            num_blocks = size // 512
         else:
-            num_blocks = bytes // 512 + 1
+            num_blocks = size // 512 + 1
         data = self.sd.read_blocks(offset, num_blocks)
-        return data[0:bytes]
 
-    def _write(self, offset: int, data: Union[List[int], bytes, bytearray]) -> int:
-        """Writes data to the C0-microSD.
+        # Slicing copies, so the buffer is returned as it is when the read
+        # already covers exactly the requested size.
+        return data if len(data) == size else data[0:size]
 
-        :param buffer: The data buffer to write.
+    def _write(
+        self,
+        offset: int,
+        data: list[int] | bytes | bytearray,
+    ) -> int:
+        """Writes data to the compute module.
+
+        :param offset: The byte offset to write to.
+        :param data: The data buffer to write.
         :return: Number of bytes written.
         """
         # Pad the data to 512 bytes

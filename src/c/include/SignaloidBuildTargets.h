@@ -26,7 +26,6 @@
  *	Build targets
  */
 #define SIGNALOID_CLOUD_DEVELOPER_PLATFORM  1
-#define SIGNALOID_C0_TESTING                2
 #define SIGNALOID_C0_MICROSD                3
 #define SIGNALOID_C0_MICROSD_PLUS           4
 #define SIGNALOID_C0_SD                     5

@@ -22,10 +22,25 @@
 
 
 import struct
+import sys
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from ..common.raw_block_device import UnifiedBlockDevice
+
+if sys.implementation.name != "circuitpython":
+    from typing import (
+        TYPE_CHECKING,
+        Any,
+        Callable,
+        Dict,
+        Iterable,
+        Optional,
+        Tuple,
+    )
+    from ..common.raw_block_device import UnifiedBlockDevice
+else:
+    TYPE_CHECKING: bool = False
+
+
 from ..common.bitstream_prefix import (
     COMMENT_WINDOW_BYTES,
     NEXUS,
@@ -33,7 +48,6 @@ from ..common.bitstream_prefix import (
     locate_prefix,
     read_prefix_json,
 )
-from ..regmap_loader import load_regmap_namespace
 
 
 SIGNALOID_SOC_STATUS_WAIT_FOR_COMMAND = 0
@@ -42,8 +56,62 @@ SIGNALOID_SOC_STATUS_DONE = 2
 SIGNALOID_SOC_STATUS_INVALID_COMMAND = 3
 BITSTREAM_UNLOCK_KEY = 0x4B4C4E55
 BITSTREAM_UNLOCK_KEY_BYTES = b"UNLK"
+IDENTITY_SIZE = 8
+
+
+def identity_tag_is_blank(tag: bytes) -> bool:
+    """True for the two values that mean "no identity register here".
+
+    A gated or dropped read returns zeros and an unmapped read returns ones.
+    Neither is a valid tag, which is what makes a miss unambiguous.
+    """
+    return tag in (b"\x00" * len(tag), b"\xFF" * len(tag))
+
 
 K_CALCULATE_NO_COMMAND = 0
+
+# Bytes per read when checksumming a bitstream.
+CRC_CHUNK_BYTES = COMMENT_WINDOW_BYTES
+
+
+# Anchor for the relative import of the default regmap package.
+try:
+    _REGMAP_ANCHOR = __package__
+except NameError:
+    _REGMAP_ANCHOR = __name__.rsplit(".", 1)[0]
+
+
+def resolve_regmap(
+    regmap: Any,
+    default_module: str,
+    package: str,
+    top_attr: str,
+    regmap_path: Optional[str] = None,
+) -> Any:
+    """Return the top-level regmap namespace class (e.g. ``Top``).
+
+    An injected ``regmap`` is used as given. Otherwise the in-tree default,
+    or the package at ``regmap_path``, is imported and used.
+
+    Args:
+        regmap: Pre-imported regmap namespace, or None to resolve one.
+        default_module: Dotted module name of the in-tree regmap package,
+            resolved relative to ``package`` (e.g. ``".regmaps.c0sd"``).
+        package: Anchor package for the relative ``default_module`` import
+            (typically the caller's package, i.e. ``_REGMAP_ANCHOR``).
+        top_attr: Name of the top-level namespace attribute to return.
+        regmap_path: Optional path to an alternative regmap package
+            directory. Host-only; ignored when ``regmap`` is given.
+
+    Returns:
+        The top-level regmap namespace class.
+    """
+    if regmap is not None:
+        return regmap
+
+    from ..regmap_loader import load_regmap_namespace
+
+    return load_regmap_namespace(default_module, package, top_attr, regmap_path)
 
 
 def to_printable(byte: int) -> str:
@@ -74,6 +142,22 @@ class UnsupportedConfigureAction(Exception):
         super().__init__(
             f"action '{action}' is not supported on {variant_name}.\n"
             f"Available actions: {', '.join(sorted(available))}"
+        )
+
+
+class SoCRunning(Exception):
+    """Raised when an operation needs the SoC core stopped and it is running.
+
+    The SD flash access gate makes the SPI flash and the OTP window read back
+    as zeros while the core runs, and discards writes to them.
+
+    """
+
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+        super().__init__(
+            f"cannot {operation} while the SoC core is running. "
+            "Stop the core first with `configure core-stop`."
         )
 
 
@@ -152,7 +236,7 @@ class C0SDBaseInterface:
         the key to 0 while the SoC core is running, so an unlock only takes
         effect while the core is stopped and starting the core re-locks.
 
-        Subclasses spread this into their own ``SUPPORTED_ACTIONS`` so the
+        Subclasses merge this into their own ``SUPPORTED_ACTIONS`` so the
         two actions stay in lock-step across variants while each supplies
         its own register offset.
         """
@@ -161,9 +245,9 @@ class C0SDBaseInterface:
             "lock-bitstream":   (0x00000000,           0xFFFFFFFF, unlock_key_offset, False),
         }
 
-    #	An unlock only takes once the SoC core has actually stopped, and a
-    #	core-stop issued moments earlier may still be draining, so retry rather
-    #	than failing on the first attempt.
+    # An unlock only takes once the SoC core has actually stopped, and a
+    # core-stop issued moments earlier may still be draining, so retry rather
+    # than failing on the first attempt.
     BITSTREAM_UNLOCK_ATTEMPTS = 10
     BITSTREAM_UNLOCK_RETRY_DELAY_S = 0.2
 
@@ -182,14 +266,14 @@ class C0SDBaseInterface:
         """
         entry = self.SUPPORTED_ACTIONS.get("unlock-bitstream")
         if entry is None:
-            #	Let apply_configure_action raise the canonical error.
+            # Let apply_configure_action raise the canonical error.
             self.apply_configure_action(
                 "unlock-bitstream", confirm_callback, verbose
             )
             return
 
-        #	Gate on the confirmation once, here, rather than per attempt: a
-        #	retry must never re-prompt, and a decline must not be retried past.
+        # Gate on the confirmation once, here, rather than per attempt: a
+        # retry must never re-prompt, and a decline must not be retried past.
         _, _, _, confirm = entry
         if confirm and (confirm_callback is None or not confirm_callback()):
             if verbose:
@@ -245,7 +329,7 @@ class C0SDBaseInterface:
         """
         if self.OTP_OFFSET is None:
             return None
-        raw = self._read(self.OTP_OFFSET + relative_offset, size)
+        raw = self.read_otp(self.OTP_OFFSET + relative_offset, size)
         stripped = strip_trailing_bytes(raw, 0xFF)
         if not stripped:
             return None
@@ -273,10 +357,8 @@ class C0SDBaseInterface:
 
     def __init__(
         self, target_device: str,
-        force_transactions: bool = False
     ) -> None:
         self.target_device = target_device
-        self.force_transactions = force_transactions
 
         self.INPUT_BUFFER_SIZE_BYTES: int = self.MMIO_BUFFER_SIZE_BYTES // 2
         self.INPUT_BUFFER_OFFSET: int = self.MMIO_BUFFER_OFFSET + self.MMIO_BUFFER_SIZE_BYTES // 2
@@ -284,7 +366,18 @@ class C0SDBaseInterface:
         self.OUTPUT_BUFFER_SIZE_BYTES: int = self.MMIO_BUFFER_SIZE_BYTES // 2
         self.OUTPUT_BUFFER_OFFSET: int = self.MMIO_BUFFER_OFFSET
 
-        self.device = UnifiedBlockDevice(path=target_device)
+        self.device = self._open_device(target_device)
+
+    def _open_device(self, target_device: str) -> "UnifiedBlockDevice":
+        """Open ``target_device`` as a raw block device.
+
+        Backs ``_read``/``_write``. Ports that reach the compute module over
+        another transport override this to return None and supply their own
+        ``_read``/``_write``.
+        """
+        from ..common.raw_block_device import UnifiedBlockDevice
+
+        return UnifiedBlockDevice(path=target_device)
 
     def _read(self, offset: int, size: int) -> bytes:
         return self.device.read(offset=offset, length=size)
@@ -368,7 +461,7 @@ class C0SDBaseInterface:
         """
         if offset is None:
             offset = self.BITSTREAM_OFFSET
-        chunk = self._read(offset, size)
+        chunk = self.read_flash(offset, size)
         prefix_start, prefix_end, _ = locate_prefix(chunk, NEXUS)
         return chunk[prefix_start:prefix_end]
 
@@ -389,7 +482,7 @@ class C0SDBaseInterface:
         """
         if offset is None:
             offset = self.BITSTREAM_OFFSET
-        chunk = self._read(offset, COMMENT_WINDOW_BYTES)
+        chunk = self.read_flash(offset, COMMENT_WINDOW_BYTES)
         return read_prefix_json(chunk, NEXUS)
 
     def verify_bitstream_crc(
@@ -424,10 +517,20 @@ class C0SDBaseInterface:
         if expected_crc is None or expected_size is None:
             return None
 
-        chunk = self._read(offset, COMMENT_WINDOW_BYTES)
+        chunk = self.read_flash(offset, COMMENT_WINDOW_BYTES)
         _, _, crc_start = locate_prefix(chunk, NEXUS)
-        payload = self._read(offset + crc_start, int(expected_size))
-        return crc32(payload) == int(expected_crc)
+
+        # Checksummed in chunks so the whole bitstream is never held in RAM.
+        # Useful for running on microcontrollers with limited RAM.
+        crc = 0
+        position = offset + crc_start
+        remaining = int(expected_size)
+        while remaining > 0:
+            size = min(CRC_CHUNK_BYTES, remaining)
+            crc = crc32(self.read_flash(position, size), crc)
+            position += size
+            remaining -= size
+        return crc == int(expected_crc)
 
     def set_command(self, value: int) -> None:
         self._write(self.COMMAND_REGISTER_OFFSET, struct.pack("<I", value))
@@ -492,9 +595,47 @@ class C0SDBaseInterface:
 
         return data_buffer
 
+    IDENTITY_TAG: Optional[bytes] = None
+
+    EXPECTED_CAPACITY_BYTES: int = 0
+    IDENTITY_OFFSET: int = 0
+
+    def read_identity_tag(self) -> bytes:
+        """Read the raw identity tag.
+
+        Not guarded by require_soc_stopped: the tag sits above the flash access
+        gate precisely so it answers in either core state.
+        """
+        return self._read(self.IDENTITY_OFFSET, IDENTITY_SIZE)
+
+    # CONFIG bit 0 is the RV32RX reset-controller enable: the same bit the
+    # `core-start` / `core-stop` configure actions drive.
+    CORE_ENABLE_MASK: int = 0x00000001
+
     def get_config_register(self) -> int:
         buffer = self._read(self.CONFIG_REGISTER_OFFSET, 4)
         return struct.unpack("<I", buffer)[0]
+
+    def soc_is_running(self) -> bool:
+        """True when the SoC core is out of reset."""
+        return bool(self.get_config_register() & self.CORE_ENABLE_MASK)
+
+    def require_soc_stopped(self, operation: str) -> None:
+        """Raise SoCRunning unless the core is stopped."""
+        if self.soc_is_running():
+            raise SoCRunning(operation)
+
+    def read_flash(self, offset: int, size: int) -> bytes:
+        self.require_soc_stopped("read the SPI flash")
+        return self._read(offset, size)
+
+    def write_flash(self, offset: int, data: bytes) -> int:
+        self.require_soc_stopped("write the SPI flash")
+        return self._write(offset, data)
+
+    def read_otp(self, offset: int, size: int) -> bytes:
+        self.require_soc_stopped("read the flash OTP")
+        return self._read(offset, size)
 
     def set_config_register(self, value: int) -> None:
         self._write(self.CONFIG_REGISTER_OFFSET, struct.pack("<I", value))
@@ -535,7 +676,13 @@ class C0SDBaseInterface:
         print(f"{'STATUS':>9}: {self.get_status():#010x}")
 
 
-class SDConfigRegisterMixin:
+if TYPE_CHECKING:
+    _SDConfigMixinBase = C0SDBaseInterface
+else:
+    _SDConfigMixinBase = object
+
+
+class SDConfigRegisterMixin(_SDConfigMixinBase):
     """Accessors for the SD config register, shared by variants that have one.
 
     Subclasses must provide ``SD_CONFIG_REGISTER_OFFSET`` and inherit
@@ -552,7 +699,7 @@ class SDConfigRegisterMixin:
     ) -> Dict[str, Tuple[int, int, int, bool]]:
         """Return the SD-config-register entries for ``SUPPORTED_ACTIONS``.
 
-        Subclasses spread this into their own ``SUPPORTED_ACTIONS`` so
+        Subclasses merge this into their own ``SUPPORTED_ACTIONS`` so
         the write-crc-* actions stay in lock-step across variants while
         each variant supplies its own register offset.
         """
@@ -651,7 +798,7 @@ class SDConfigRegisterMixin:
 
     def verbose_status(self) -> None:
         """Extend the base report with the SD_CONFIG register."""
-        super().verbose_status()
+        C0SDBaseInterface.verbose_status(self)
         print(f"{'SD_CONFIG':>9}: {self.get_sd_config_register():#010x}")
 
 
@@ -668,17 +815,21 @@ class C0microSDPlusInterface(SDConfigRegisterMixin, C0SDBaseInterface):
     """Interface for the C0-microSD+ variant. CLI default."""
 
     DISPLAY_NAME = "C0-microSD+"
+    IDENTITY_TAG = b"S-C0-01\x00"
 
     def __init__(
             self,
             target_device: str,
-            force_transactions: bool = False,
+            regmap: Optional[Any] = None,
             regmap_path: Optional[str] = None,
             ) -> None:
-        top = load_regmap_namespace(
-            ".regmaps.c0microsdplus", __package__, "Top", regmap_path
+        top = resolve_regmap(
+            regmap, ".regmaps.c0microsdplus", _REGMAP_ANCHOR, "Top", regmap_path
         )
         csr = top.Csr
+
+        self.EXPECTED_CAPACITY_BYTES = top.AxilPibDma.BASE_ADDR
+        self.IDENTITY_OFFSET = top.DeviceId.Identity0.ADDR
 
         self.BITSTREAM_OFFSET = top.SpiFlash.Bitstream.BOTTOM_ENTRY
         self.APPLICATION_BINARY_OFFSET = top.SpiFlash.UserData.BOTTOM_ENTRY
@@ -703,9 +854,6 @@ class C0microSDPlusInterface(SDConfigRegisterMixin, C0SDBaseInterface):
         self.SUPPORTED_ACTIONS: Dict[str, Tuple[int, int, int, bool]] = {
             "core-start":       (0x00000001, 0x00000001, config, False),
             "core-stop":        (0x00000000, 0x00000001, config, False),
-            **self.bitstream_lock_actions(
-                self.BITSTREAM_UNLOCK_REGISTER_OFFSET
-            ),
             "sw-led-on":        (0x0000000C, 0x0000000C, config, False),
             "sw-led-off":       (0x00000000, 0x0000000C, config, False),
             "red-led-on":       (0x00000010, 0x00000010, config, False),
@@ -720,10 +868,15 @@ class C0microSDPlusInterface(SDConfigRegisterMixin, C0SDBaseInterface):
             "debug-pin-1-off":  (0x00000000, 0x00000100, config, False),
             "debug-pin-2-on":   (0x00000200, 0x00000200, config, False),
             "debug-pin-2-off":  (0x00000000, 0x00000200, config, False),
-            **self.sd_config_actions(self.SD_CONFIG_REGISTER_OFFSET),
         }
+        self.SUPPORTED_ACTIONS.update(
+            self.bitstream_lock_actions(self.BITSTREAM_UNLOCK_REGISTER_OFFSET)
+        )
+        self.SUPPORTED_ACTIONS.update(
+            self.sd_config_actions(self.SD_CONFIG_REGISTER_OFFSET)
+        )
 
-        super().__init__(target_device, force_transactions)
+        super().__init__(target_device)
 
     def get_config_register_unpacked(self) -> Tuple[bool, ...]:
         """Read the config register and unpack its boolean fields.
@@ -855,17 +1008,21 @@ class C0SDInterface(SDConfigRegisterMixin, C0SDBaseInterface):
     """
 
     DISPLAY_NAME = "C0-SD"
+    IDENTITY_TAG = b"S-C0-02\x00"
 
     def __init__(
             self,
             target_device: str,
-            force_transactions: bool = False,
+            regmap: Optional[Any] = None,
             regmap_path: Optional[str] = None,
             ) -> None:
-        top = load_regmap_namespace(
-            ".regmaps.c0sd", __package__, "Top", regmap_path
+        top = resolve_regmap(
+            regmap, ".regmaps.c0sd", _REGMAP_ANCHOR, "Top", regmap_path
         )
         csr = top.Csr
+
+        self.EXPECTED_CAPACITY_BYTES = top.AxilPibDma.BASE_ADDR
+        self.IDENTITY_OFFSET = top.DeviceId.Identity0.ADDR
 
         self.BITSTREAM_OFFSET = top.SpiFlash.Bitstream.BOTTOM_ENTRY
         self.APPLICATION_BINARY_OFFSET = top.SpiFlash.UserData.BOTTOM_ENTRY
@@ -890,19 +1047,21 @@ class C0SDInterface(SDConfigRegisterMixin, C0SDBaseInterface):
         self.SUPPORTED_ACTIONS: Dict[str, Tuple[int, int, int, bool]] = {
             "core-start":       (0x00000001, 0x00000001, config, False),
             "core-stop":        (0x00000000, 0x00000001, config, False),
-            **self.bitstream_lock_actions(
-                self.BITSTREAM_UNLOCK_REGISTER_OFFSET
-            ),
             "sw-led-on":        (0x0000000C, 0x0000000C, config, False),
             "sw-led-off":       (0x00000000, 0x0000000C, config, False),
             "green-led-on":     (0x00000010, 0x00000010, config, False),
             "green-led-off":    (0x00000000, 0x00000010, config, False),
             "debug-pin-on":     (0x00000020, 0x00000020, config, False),
             "debug-pin-off":    (0x00000000, 0x00000020, config, False),
-            **self.sd_config_actions(self.SD_CONFIG_REGISTER_OFFSET),
         }
+        self.SUPPORTED_ACTIONS.update(
+            self.bitstream_lock_actions(self.BITSTREAM_UNLOCK_REGISTER_OFFSET)
+        )
+        self.SUPPORTED_ACTIONS.update(
+            self.sd_config_actions(self.SD_CONFIG_REGISTER_OFFSET)
+        )
 
-        super().__init__(target_device, force_transactions)
+        super().__init__(target_device)
 
     def get_config_register_unpacked(self) -> Tuple[bool, ...]:
         """Read the config register and unpack its boolean fields.
