@@ -21,27 +21,23 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-from __future__ import annotations
-
 import json
 import struct
+import sys
 import time
 
-
-# Try importing the typing module when using this script with Python.
-# CircuitPython does not support the typing module, so just ignore the import.
-try:
+if sys.implementation.name != "circuitpython":
     from typing import Literal
-except Exception:
-    pass
+    from ..common.raw_block_device import UnifiedBlockDevice
 
 
-from ..common.raw_block_device import UnifiedBlockDevice
-from ..common.bitstream_prefix import crc32, find_json_object
 from .constants import BOOTLOADER_CONSTANTS, SOC_CONSTANTS
 
-
 SIGNALOID_SOC_STATUS_WAIT_FOR_COMMAND = 0
+
+
+from ..common.bitstream_prefix import crc32, find_json_object
+
 SIGNALOID_SOC_STATUS_CALCULATING = 1
 SIGNALOID_SOC_STATUS_DONE = 2
 SIGNALOID_SOC_STATUS_INVALID_COMMAND = 3
@@ -55,14 +51,16 @@ class C0microSDInterface:
     This class provides basic functionality for interfacing with the
     Signaloid C0-microSD.
     """
+
     # 128 KiB offset for hardware status
     DEVICE_CONFIGURATION_STATUS_OFFSET = 0x20000
     BOOTLOADER_CHECK_WORD = b"SBLD"
     SOC_CHECK_WORD = b"SSOC"
 
     def __init__(
-        self, target_device: str,
-        force_transactions: bool = False
+        self,
+        target_device: str,
+        force_transactions: bool = False,
     ) -> None:
         """
         Initializes the C0-microSD interface.
@@ -75,13 +73,24 @@ class C0microSDInterface:
         """
         self.target_device = target_device
 
-        self.configuration: Literal['bootloader', 'soc'] | None = None
+        self.configuration: Literal["bootloader", "soc"] | None = None
         self.configuration_version: tuple[int, int] | None = None
         self.configuration_state: int | None = None
         self.configuration_switching: bool = False
         self.force_transactions: bool = force_transactions
 
-        self.device = UnifiedBlockDevice(path=target_device)
+        self.device = self._open_device(target_device)
+
+    def _open_device(self, target_device: str) -> "UnifiedBlockDevice":
+        """Open ``target_device`` as a raw block device.
+
+        Backs ``_read``/``_write``. Ports that reach the compute module over
+        another transport override this to return None and supply their own
+        ``_read``/``_write``.
+        """
+        from ..common.raw_block_device import UnifiedBlockDevice
+
+        return UnifiedBlockDevice(path=target_device)
 
     def _read(self, offset: int, size: int) -> bytes:
         return self.device.read(offset=offset, length=size)
@@ -105,17 +114,18 @@ class C0microSDInterface:
         # Decode configuration data register
         configuration_version = data[4:8]
         major_version = (
-            (configuration_version[0] << 8) | configuration_version[1]
-        )
+            configuration_version[0] << 8
+        ) | configuration_version[1]
         minor_version = (
-            (configuration_version[2] << 8) | configuration_version[3]
-        )
+            configuration_version[2] << 8
+        ) | configuration_version[3]
         self.configuration_version = (major_version, minor_version)
         # Decode configuration state register
         self.configuration_state = struct.unpack(">I", data[8:12])[0]
         self.configuration_switching = (
             bool(self.configuration_state & 1)
-            if self.configuration_state is not None else False
+            if self.configuration_state is not None
+            else False
         )
 
         if self.configuration_switching and not self.force_transactions:
@@ -158,36 +168,36 @@ class C0microSDInterface:
         return find_json_object(data)
 
     def get_bitstream_prefix(
-            self,
-            bitstream_offset: int) -> tuple[dict | None, int, int]:
+        self,
+        bitstream_offset: int,
+    ) -> tuple[dict | None, int, int]:
         """
         Reads the prefix section of a bitstream
 
         :param bitstream_offset: Offset of bitstream in flash memory
         """
-
         # We assume that the prefix is never going to be larger than 4K
         self.get_status()
         prefix_chunk = self._read(bitstream_offset, 4096)
-
         # Decode prefix chunk to find prefix
         prefix = find_json_object(prefix_chunk)
 
-        if (prefix is None):
+        if prefix is None:
             raise ValueError("Could not find bitstream prefix section.")
 
         try:
             major_bitstream_version = int(str(prefix["v"]).split(".")[0])
         except Exception:
             major_bitstream_version = 1
-
         # Use the bitstream version to know exactly how to
         # find start and end of prefix. This is required to calculate
         # the CRC
-        prefix_start_word = \
-            BOOTLOADER_CONSTANTS[major_bitstream_version].kBitstreamPrefixStart
-        prefix_end_word = \
-            BOOTLOADER_CONSTANTS[major_bitstream_version].kBitstreamPrefixEnd
+        prefix_start_word = BOOTLOADER_CONSTANTS[
+            major_bitstream_version
+        ].kBitstreamPrefixStart
+        prefix_end_word = BOOTLOADER_CONSTANTS[
+            major_bitstream_version
+        ].kBitstreamPrefixEnd
 
         prefix_start = prefix_chunk.find(prefix_start_word)
         prefix_end = prefix_chunk.find(prefix_end_word, prefix_start)
@@ -196,11 +206,11 @@ class C0microSDInterface:
         return prefix, prefix_start, prefix_end
 
     def verify_bitstream_crc(
-            self,
-            bitstream_offset: int,
-            bitstream_crc: int,
-            bitstream_prefix_size: int,
-            bitstream_size: int
+        self,
+        bitstream_offset: int,
+        bitstream_crc: int,
+        bitstream_prefix_size: int,
+        bitstream_size: int,
     ) -> bool:
         """
         Verifies a the crc32 checksum of a bitstream
@@ -229,8 +239,8 @@ class C0microSDInterface:
         """
 
         prefix, _, prefix_end = self.get_bitstream_prefix(offset)
-        print("    Bitstream prefix section: "
-              f"{json.dumps(prefix, separators=(', ', ': '))}")
+        prefix_text = json.dumps(prefix, separators=(', ', ': '))
+        print(f"    Bitstream prefix section: {prefix_text}")
 
         try:
             if "bitstream_crc" in prefix:
@@ -247,7 +257,7 @@ class C0microSDInterface:
                 offset,
                 bitstream_crc,
                 prefix_end,
-                bitstream_size
+                bitstream_size,
             )
 
             if crc_pass:
@@ -272,35 +282,41 @@ class C0microSDSignaloidSoCInterface(C0microSDInterface):
     def __init__(
         self,
         target_device: str,
-        force_transactions: bool = False
+        force_transactions: bool = False,
     ) -> None:
         super().__init__(target_device, force_transactions)
         self.get_status()
 
         soc_major_version = (
-            self.configuration_version[0]
-            if self.configuration_version else 0
+            self.configuration_version[0] if self.configuration_version else 0
         )
-        self.MOSI_BUFFER_SIZE_BYTES = \
-            SOC_CONSTANTS[soc_major_version].kMosiBufferSizeBytes
+        self.MOSI_BUFFER_SIZE_BYTES = SOC_CONSTANTS[
+            soc_major_version
+        ].kMosiBufferSizeBytes
 
-        self.MISO_BUFFER_SIZE_BYTES = \
-            SOC_CONSTANTS[soc_major_version].kMisoBufferSizeBytes
+        self.MISO_BUFFER_SIZE_BYTES = SOC_CONSTANTS[
+            soc_major_version
+        ].kMisoBufferSizeBytes
 
-        self.STATUS_REGISTER_OFFSET = \
-            SOC_CONSTANTS[soc_major_version].kStatusRegisterOffset
+        self.STATUS_REGISTER_OFFSET = SOC_CONSTANTS[
+            soc_major_version
+        ].kStatusRegisterOffset
 
-        self.SOC_CONTROL_REGISTER_OFFSET = \
-            SOC_CONSTANTS[soc_major_version].kSOCControlRegisterOffset
+        self.SOC_CONTROL_REGISTER_OFFSET = SOC_CONSTANTS[
+            soc_major_version
+        ].kSOCControlRegisterOffset
 
-        self.COMMAND_REGISTER_OFFSET = \
-            SOC_CONSTANTS[soc_major_version].kCommandRegisterOffset
+        self.COMMAND_REGISTER_OFFSET = SOC_CONSTANTS[
+            soc_major_version
+        ].kCommandRegisterOffset
 
-        self.MOSI_BUFFER_OFFSET = \
-            SOC_CONSTANTS[soc_major_version].kMOSIBufferOffset
+        self.MOSI_BUFFER_OFFSET = SOC_CONSTANTS[
+            soc_major_version
+        ].kMOSIBufferOffset
 
-        self.MISO_BUFFER_OFFSET = \
-            SOC_CONSTANTS[soc_major_version].kMISOBufferOffset
+        self.MISO_BUFFER_OFFSET = SOC_CONSTANTS[
+            soc_major_version
+        ].kMISOBufferOffset
 
         self.INPUT_BUFFER_SIZE_BYTES = self.MOSI_BUFFER_SIZE_BYTES
         self.OUTPUT_BUFFER_SIZE_BYTES = self.MISO_BUFFER_SIZE_BYTES
@@ -321,7 +337,7 @@ class C0microSDSignaloidSoCInterface(C0microSDInterface):
 
     def read_signaloid_soc_MISO_buffer(
         self,
-        size: int | None = None
+        size: int | None = None,
     ) -> bytes:
         """
         Reads data from the C0-microSD MISO buffer.
@@ -360,7 +376,7 @@ class C0microSDSignaloidSoCInterface(C0microSDInterface):
 
     def read_debug_log_buffer(
         self,
-        size: int = DEBUG_LOG_BUFFER_SIZE_BYTES
+        size: int = DEBUG_LOG_BUFFER_SIZE_BYTES,
     ) -> bytes:
         """
         Reads data from the C0-microSD UART buffer.
@@ -401,13 +417,13 @@ class C0microSDSignaloidSoCInterface(C0microSDInterface):
         return struct.unpack("<I", buffer)[0]
 
     def calculate_command(
-            self,
-            command: int,
-            idle_command: int = K_CALCULATE_NO_COMMAND,
-            poll_sleep_time: float = 0.5,
-            skip_MISO_read: bool = False,
-            verbose: bool = True,
-            timeout_waiting_to_start: float = 0.5,
+        self,
+        command: int,
+        idle_command: int = K_CALCULATE_NO_COMMAND,
+        poll_sleep_time: float = 0.5,
+        skip_MISO_read: bool = False,
+        verbose: bool = True,
+        timeout_waiting_to_start: float = 0.5,
     ) -> bytes | None:
         """
         Basic command calculation routine. This function sends a command to

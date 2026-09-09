@@ -3,4 +3,5 @@
 from .top_regs import Top
 from .spi_flash_regs import SpiFlash
 from .csr_regs import Csr
+from .device_id_regs import DeviceId
 from .axil_pib_dma_regs import AxilPibDma

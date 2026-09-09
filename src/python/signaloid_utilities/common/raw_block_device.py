@@ -53,6 +53,11 @@ from contextlib import contextmanager
 
 DEFAULT_BLOCK_SIZE = 512
 
+# macOS (Darwin) disk-driver ioctls, from <sys/disk.h>. Encoded with
+# _IOR('d', n, type) = IOC_OUT | sizeof(type) << 16 | 'd' << 8 | n.
+_DKIOCGETBLOCKSIZE = 0x40046418   # _IOR('d', 24, uint32_t): logical block size
+_DKIOCGETBLOCKCOUNT = 0x40086419  # _IOR('d', 25, uint64_t): number of blocks
+
 
 @contextmanager
 def _handle_device_errors(path: str):
@@ -79,6 +84,25 @@ def _handle_device_errors(path: str):
         raise OSError(
             f"I/O error while accessing {path}: {error.strerror or error}."
         ) from error
+
+
+def _darwin_capacity_bytes(fd: int) -> int:
+    """Return the capacity in bytes of the macOS disk node open on ``fd``.
+
+    Queries the disk driver directly, because on macOS ``lseek(SEEK_END)``
+    and ``fstat().st_size`` both report 0 for device nodes. Works on both the
+    buffered (``/dev/diskN``) and raw (``/dev/rdiskN``) nodes.
+
+    :raises OSError: if either ioctl is refused (for example, ``fd`` is not a
+        disk node).
+    """
+    block_size = struct.unpack(
+        "I", fcntl.ioctl(fd, _DKIOCGETBLOCKSIZE, bytes(4))
+    )[0]
+    block_count = struct.unpack(
+        "Q", fcntl.ioctl(fd, _DKIOCGETBLOCKCOUNT, bytes(8))
+    )[0]
+    return block_size * block_count
 
 
 class BlockDevice(ABC):
@@ -380,6 +404,38 @@ class UnifiedBlockDevice:
 
         self.read = self.device.read
         self.write = self.device.write
+
+    def capacity_bytes(self) -> int:
+        """Size of the underlying block device in bytes.
+
+        Opens its own short-lived descriptor rather than seeking the device's,
+        so it cannot disturb an in-flight transfer.
+
+        On Linux the block layer reports the capacity as the node's size, so
+        seeking to the end is enough. macOS does not: ``lseek(SEEK_END)`` on a
+        ``/dev/diskN`` or ``/dev/rdiskN`` node succeeds and returns 0, so the
+        capacity is instead taken from the disk driver as block count times
+        block size.
+
+        :raises OSError: if the operating system reports no usable capacity.
+        """
+        with _handle_device_errors(self.path):
+            fd = os.open(self.path, os.O_RDONLY)
+            try:
+                if sys.platform == "darwin":
+                    size = _darwin_capacity_bytes(fd)
+                else:
+                    size = os.lseek(fd, 0, os.SEEK_END)
+            finally:
+                os.close(fd)
+
+            # A C0 device is never zero-sized.
+            if size <= 0:
+                raise OSError(
+                    f"Could not determine the capacity of {self.path} "
+                    f"(the operating system reported {size} bytes)."
+                )
+            return size
 
     def close(self):
         if self.device is not None:

@@ -31,24 +31,27 @@ Two Lattice FPGA families frame the metadata differently:
 Pure ``bytes``-in/``bytes``-out, so it can be exercised without hardware.
 """
 
-from __future__ import annotations
 
 import json
-import zlib
-from dataclasses import dataclass
-from typing import Any
+import sys
 
 
-def crc32(data: bytes) -> int:
+if sys.implementation.name != "circuitpython":
+    from typing import Any
+
+
+from binascii import crc32 as _crc32
+
+
+def crc32(data: bytes, crc: int = 0) -> int:
     """Return the unsigned 32-bit CRC-32 of ``data``.
 
-    ``zlib.crc32`` and ``binascii.crc32`` compute the identical checksum;
-    this is the single CRC function shared across the toolchain.
+    Pass the running value as ``crc`` to checksum a stream in pieces:
+    ``crc32(b, crc32(a)) == crc32(a + b)``.
     """
-    return zlib.crc32(data) & 0xFFFFFFFF
+    return _crc32(data, crc) & 0xFFFFFFFF
 
 
-@dataclass(frozen=True)
 class PrefixProfile:
     """Per-FPGA-family framing of the bitstream metadata prefix.
 
@@ -66,13 +69,26 @@ class PrefixProfile:
             are stored for this family. Used only by the write side.
     """
 
-    key: str
-    signature: bytes | None
-    start_marker: bytes
-    end_marker: bytes
-    default_fixed_length: bool
-    crc_key: str
-    size_key: str
+    def __init__(
+        self,
+        key: str,
+        signature: bytes | None,
+        start_marker: bytes,
+        end_marker: bytes,
+        default_fixed_length: bool,
+        crc_key: str,
+        size_key: str,
+    ) -> None:
+        self.key = key
+        self.signature = signature
+        self.start_marker = start_marker
+        self.end_marker = end_marker
+        self.default_fixed_length = default_fixed_length
+        self.crc_key = crc_key
+        self.size_key = size_key
+
+    def __repr__(self) -> str:
+        return f"PrefixProfile(key={self.key!r})"
 
 
 NEXUS = PrefixProfile(
@@ -146,27 +162,63 @@ def locate_prefix(
     return prefix_start, prefix_end, crc_start
 
 
+def _decode_ascii(data: bytes) -> str:
+    """Decode ``data`` as ASCII, dropping any non-ASCII bytes."""
+    return "".join(chr(byte) for byte in data if byte < 0x80)
+
+
+def _json_object_end(text: str, start: int) -> int:
+    """Return the index just past the JSON object beginning at ``text[start]``.
+
+    Returns -1 if the object is never closed. String literals and their
+    escapes are tracked, so braces inside string values (e.g.
+    ``{"note": "a}b"}``) do not affect the brace depth.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
 def find_json_object(data: bytes) -> dict[str, Any] | None:
     """Return the first top-level JSON object in ``data``.
 
-    Attempts to decode a JSON value starting at each ``{`` using the
-    standard-library decoder, which correctly honours string literals and
-    escapes -- so braces inside string values (e.g. ``{"note": "a}b"}``)
-    do not confuse the scan. Surrounding non-JSON bytes such as padding
-    spaces are ignored. Returns ``None`` if no JSON object is present.
+    Delimits the object at each ``{`` by brace matching that honours
+    string literals and escapes -- so braces inside string values (e.g.
+    ``{"note": "a}b"}``) do not confuse the scan -- then decodes that
+    slice. Surrounding non-JSON bytes such as padding spaces are ignored.
+    Returns ``None`` if no JSON object is present.
 
     """
-    ascii_str = data.decode("ascii", errors="ignore")
-    decoder = json.JSONDecoder()
+    ascii_str = _decode_ascii(data)
 
     index = ascii_str.find("{")
     while index != -1:
-        try:
-            decoded, _ = decoder.raw_decode(ascii_str, index)
-        except json.JSONDecodeError:
-            decoded = None
-        if isinstance(decoded, dict):
-            return decoded
+        end = _json_object_end(ascii_str, index)
+        if end != -1:
+            try:
+                decoded = json.loads(ascii_str[index:end])
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, dict):
+                return decoded
         index = ascii_str.find("{", index + 1)
     return None
 

@@ -30,7 +30,7 @@ from signaloid_utilities.sddev.sddev import SDDevController
 APP_VERSION = "0.1"  # Application version
 
 
-if __name__ == "__main__":
+def main(explicit_args: list[str] | None = None):
     parser = argparse.ArgumentParser(
         description=f"Signaloid SD_Dev_toolkit. Version {APP_VERSION}",
         add_help=False
@@ -57,7 +57,7 @@ if __name__ == "__main__":
         help="Verbose printing",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(explicit_args)
     controller = SDDevController()
 
     full_size_sd_detect, micro_sd_detect = controller.detect_cards()
@@ -70,3 +70,7 @@ if __name__ == "__main__":
         if args.verbose:
             print("Power cycling SD cards...")
         controller.refresh_sd_cards(dynamic=True)
+
+
+if __name__ == "__main__":
+    main()

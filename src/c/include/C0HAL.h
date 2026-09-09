@@ -43,8 +43,6 @@
  #include "C0microSDPlus/HAL.h"
 #elif BUILD_FOR == SIGNALOID_C0_SD
  #include "C0SD/HAL.h"
-#elif BUILD_FOR == SIGNALOID_C0_TESTING
- #include "C0microSDMock/HAL.h"
 #else
  #error "BUILD_FOR is not set to a known Signaloid compute-module target."
 #endif

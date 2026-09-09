@@ -1,9 +1,45 @@
-# Signaloid C0 compute-module C library
+# Signaloid C0 Compute-Module C Library
 
-C sources, headers and build glue for applications that run on the Signaloid
-C0 compute modules. The library is organised so that a single application
-source tree can target any compute-module variant unchanged — the
-variant-specific details live behind a Hardware Abstraction Layer (HAL).
+C sources and headers for the Signaloid C0 compute modules. The library covers
+both sides of the interface.
+
+- **Device side.** Code that runs on the module. A Hardware Abstraction Layer
+  (HAL) keeps the variant-specific details behind one API, so a single
+  application source tree can target any compute-module variant unchanged.
+  Through the HAL, device-side code sets the module's status register, drives
+  its LEDs and debug pins, and reads the command register that the host
+  writes. Device-side code never starts a transfer. The code waits for a
+  command from the host and returns results through the shared MMIO output
+  buffer. The device side comprises `C0HAL.h`, `C0mmioCommonHAL.h`,
+  `C0Logger.h`, and the per-variant `HAL.h` and `Constants.h` headers.
+- **Host side.** Libraries for building C host applications that control a
+  module over its block-device interface. These libraries perform block reads
+  and writes at the variant's offsets, register access, and
+  configuration-status decoding and printing. The host side comprises the
+  per-variant `HostUtils.h` headers and their `lib/` implementations. These
+  libraries use POSIX file I/O and run on Linux and macOS, which are the only
+  officially tested operating systems.
+
+## Build targets
+
+`BUILD_FOR` selects the variant for **device-side** code only. Define it to one of the identifiers
+in `include/SignaloidBuildTargets.h`. `C0HAL.h` dispatches on it to pull in that variant's HAL, and
+rejects an unknown value with an `#error`.
+
+| `BUILD_FOR`                 | Compute module | HAL header            |
+| --------------------------- | -------------- | --------------------- |
+| `SIGNALOID_C0_MICROSD`      | C0-microSD     | `C0microSD/HAL.h`     |
+| `SIGNALOID_C0_MICROSD_PLUS` | C0-microSD+    | `C0microSDPlus/HAL.h` |
+| `SIGNALOID_C0_SD`           | C0-SD          | `C0SD/HAL.h`          |
+
+
+`SignaloidBuildTargets.h` reserves `SIGNALOID_CLOUD_DEVELOPER_PLATFORM` for the Signaloid Cloud
+Developer Platform. That target has no HAL in this library.
+
+
+Host-side code does not use `BUILD_FOR` at all. A host application picks its variant by including
+that variant's `HostUtils.h` and linking the matching `lib/C0<variant>/HostUtils.c`, so one host
+binary targets one module.
 
 ## Directory layout
 

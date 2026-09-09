@@ -37,7 +37,7 @@ def sigint_handler(signal, frame):
     sys.exit(0)
 
 
-if __name__ == "__main__":
+def main(explicit_args: list[str] | None = None):
 
     # Register the signal handler for SIGINT
     signal.signal(signal.SIGINT, sigint_handler)
@@ -98,7 +98,7 @@ if __name__ == "__main__":
         help="Sample bits."
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(explicit_args)
 
     print("SMBusNumber:\t\t\t" + str(args.smbus_number))
     print("Channel:\t\t\t" + str(args.channel))
@@ -146,3 +146,7 @@ if __name__ == "__main__":
             )
 
         measurement_count += 1
+
+
+if __name__ == "__main__":
+    main()

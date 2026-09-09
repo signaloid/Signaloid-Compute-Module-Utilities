@@ -2,6 +2,7 @@
 
 from .spi_flash_regs import SpiFlash as _SpiFlash
 from .csr_regs import Csr as _Csr
+from .device_id_regs import DeviceId as _DeviceId
 from .axil_pib_dma_regs import AxilPibDma as _AxilPibDma
 
 
@@ -25,4 +26,5 @@ class Top:
         BOTTOM_ENTRY = 0x10100000
         TOP_ENTRY = 0x1010fffc
         SIZE_BYTES = 0x10000
+    DeviceId = _DeviceId
     AxilPibDma = _AxilPibDma
