@@ -22,13 +22,13 @@
 
 import argparse
 import sys
-import os
 import re
 from typing import Optional, Tuple
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
 
+from signaloid_utilities.common import sysexits
 from signaloid_utilities.c0microsd.interface import C0microSDInterface
 from signaloid_utilities.c0microsd.constants import BOOTLOADER_CONSTANTS
 from signaloid_utilities.common.bitstream_prefix import (
@@ -458,7 +458,7 @@ def main(explicit_args: list[str] | None = None):
                     "non-volatile memory, switch to Bootloader mode and "
                     "try again."
                 )
-                exit(os.EX_CONFIG)
+                exit(sysexits.EX_CONFIG)
 
             print(f"Device Serial Number: {toolkit.get_serial_number()}")
             print(f"Device UUID: {toolkit.get_uuid()}")
@@ -479,7 +479,7 @@ def main(explicit_args: list[str] | None = None):
                     print("You can attempt to fix the Warmboot "
                           "section by using the -y argument")
             print("Done.")
-            exit(os.EX_OK)
+            exit(sysexits.EX_OK)
 
         # Print additional information and exit
         if args.flash_warmboot:
@@ -491,7 +491,7 @@ def main(explicit_args: list[str] | None = None):
                     "non-volatile memory, switch to Bootloader mode and "
                     "try again."
                 )
-                exit(os.EX_CONFIG)
+                exit(sysexits.EX_CONFIG)
 
             if (toolkit.configuration_version[0] < 2):
                 print(
@@ -500,29 +500,29 @@ def main(explicit_args: list[str] | None = None):
                     f"{toolkit.configuration_version[1]} "
                     "cannot flash the warmboot section."
                 )
-                exit(os.EX_CONFIG)
+                exit(sysexits.EX_CONFIG)
 
             if not confirm_action():
                 print("Aborting.")
-                exit(os.EX_USAGE)
+                exit(sysexits.EX_USAGE)
             print("Flashing wamrboot section...")
             warmboot_bytes = bytes.fromhex(toolkit.WARMBOOT_TEMPLATE)
             print(toolkit.WARMBOOT_TEMPLATE)
             toolkit.flash_and_verify(warmboot_bytes, 0, 10, True)
             print("Done.")
-            exit(os.EX_OK)
+            exit(sysexits.EX_OK)
 
         # This is the time to switch boot mode if needed.
         if args.switch_boot_mode:
             toolkit.switch_boot_config()
             print("Done.")
-            exit(os.EX_OK)
+            exit(sysexits.EX_OK)
 
         # All commands after this point need an input file
         if not args.input_file:
             parser.print_help()
             print("\nOption -b is required when flashing data.")
-            sys.exit(os.EX_USAGE)
+            sys.exit(sysexits.EX_USAGE)
 
         # Open the input file and store data in memory.
         file_data = None
@@ -569,11 +569,11 @@ def main(explicit_args: list[str] | None = None):
                       "https://github.com/signaloid/C0-microSD-Hardware "
                       "to get the latest Bootloader bitstream")
                 print("Aborting.")
-                exit(os.EX_USAGE)
+                exit(sysexits.EX_USAGE)
 
             if not confirm_action():
                 print("Aborting.")
-                exit(os.EX_USAGE)
+                exit(sysexits.EX_USAGE)
 
             print("Flashing bootloader bitstream...")
             toolkit.flash_and_verify(
@@ -596,11 +596,11 @@ def main(explicit_args: list[str] | None = None):
                       "https://github.com/signaloid/C0-microSD-Hardware "
                       "to get the latest Signaloid SoC bitstream")
                 print("Aborting.")
-                exit(os.EX_USAGE)
+                exit(sysexits.EX_USAGE)
 
             if not confirm_action():
                 print("Aborting.")
-                exit(os.EX_USAGE)
+                exit(sysexits.EX_USAGE)
 
             print("Flashing Signaloid SoC bitstream...")
             toolkit.flash_and_verify(
@@ -642,13 +642,13 @@ def main(explicit_args: list[str] | None = None):
     except Exception as e:
         print(f"{e}\nAn error occurred, aborting.", file=sys.stderr)
         if isinstance(e, ValueError):
-            exit(os.EX_DATAERR)
+            exit(sysexits.EX_DATAERR)
         elif isinstance(e, FileNotFoundError):
-            exit(os.EX_NOINPUT)
+            exit(sysexits.EX_NOINPUT)
         elif isinstance(e, PermissionError):
-            exit(os.EX_NOPERM)
+            exit(sysexits.EX_NOPERM)
         else:
-            exit(os.EX_SOFTWARE)
+            exit(sysexits.EX_SOFTWARE)
 
 
 if __name__ == "__main__":

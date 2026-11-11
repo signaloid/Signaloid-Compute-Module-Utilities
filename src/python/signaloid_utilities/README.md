@@ -22,8 +22,9 @@ its interface logic and register maps through symlinks, replacing only the trans
 
 | Module                       | Purpose                                                                                                                                                                                    |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `common/raw_block_device.py` | Cache-bypassing reads and writes to a device node. `UnifiedBlockDevice` picks the right unbuffered implementation for Linux or macOS.                                                      |
+| `common/raw_block_device.py` | Cache-bypassing reads and writes to a device node. `UnifiedBlockDevice` picks the right unbuffered implementation for Linux, macOS or Windows.                                             |
 | `common/bitstream_prefix.py` | Read and decode the JSON metadata prefix of a Signaloid bitstream, and check its CRC.                                                                                                      |
+| `common/sysexits.py`         | The `<sysexits.h>` exit codes the toolkits use, on every platform (`os.EX_*` exists only on Unix).                                                                                         |
 | `regmap_loader.py`           | Load a variant's auto-generated register-map package. Defaults to the built-in maps, which cover the shipped hardware. `--regmap-path` overrides them for a custom hardware configuration. |
 | `debug_logger.py`            | The `C0_debug_logger.py` tool, below.                                                                                                                                                      |
 

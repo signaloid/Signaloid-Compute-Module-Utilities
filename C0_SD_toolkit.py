@@ -22,7 +22,6 @@
 
 import argparse
 import sys
-import os
 import json
 import re
 import time
@@ -31,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Optional, Type
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
 
+from signaloid_utilities.common import sysexits
 from signaloid_utilities.c0sd.interface import (
     C0SDBaseInterface,
     C0microSDPlusInterface,
@@ -47,12 +47,17 @@ MAX_FLASH_ATTEMPTS = 5  # Maximum flashing attempts
 # Any keys not listed here are printed generically after these.
 BITSTREAM_METADATA_LABELS = [
     ("compute_module_type", "Compute module type"),
+    ("board_revision", "Board revision"),
     ("bitstream_creation_date", "Creation date"),
     ("type", "Bitstream type"),
     ("v", "Metadata schema"),
     ("bitstream_size", "Bitstream size"),
     ("bitstream_crc", "Bitstream CRC"),
 ]
+
+# Values shown for known keys that a bitstream does not carry. Bitstreams
+# without board_revision are for board revision 1.0.
+BITSTREAM_METADATA_DEFAULTS = {"board_revision": "1.0"}
 
 
 class _C0SDToolkitMixin:
@@ -161,8 +166,8 @@ class _C0SDToolkitMixin:
         remaining keys generically, in the 4-space-indented style."""
         shown = set()
         for key, label in BITSTREAM_METADATA_LABELS:
-            if key in meta:
-                value = meta[key]
+            if key in meta or key in BITSTREAM_METADATA_DEFAULTS:
+                value = meta.get(key, BITSTREAM_METADATA_DEFAULTS.get(key))
                 if key == "bitstream_crc" and isinstance(value, int):
                     value = f"0x{value:08X}"
                 elif key == "bitstream_size":
@@ -423,17 +428,17 @@ def _exit_for_exception(e: Exception) -> None:
         # Not a fault: the device is fine, the caller just asked for
         # something that needs the core stopped. Distinct code so scripts can
         # tell "stop the core and retry" from a real I/O failure.
-        exit(os.EX_TEMPFAIL)
+        exit(sysexits.EX_TEMPFAIL)
     elif isinstance(e, IdentityMismatch):
-        exit(os.EX_DATAERR)
+        exit(sysexits.EX_DATAERR)
     elif isinstance(e, ValueError):
-        exit(os.EX_DATAERR)
+        exit(sysexits.EX_DATAERR)
     elif isinstance(e, FileNotFoundError):
-        exit(os.EX_NOINPUT)
+        exit(sysexits.EX_NOINPUT)
     elif isinstance(e, PermissionError):
-        exit(os.EX_NOPERM)
+        exit(sysexits.EX_NOPERM)
     else:
-        exit(os.EX_SOFTWARE)
+        exit(sysexits.EX_SOFTWARE)
 
 
 def handle_info(args):
@@ -466,7 +471,7 @@ def handle_info(args):
                 toolkit.apply_configure_action("core-start")
 
         print("Done.")
-        exit(os.EX_OK)
+        exit(sysexits.EX_OK)
     except Exception as e:
         _exit_for_exception(e)
 
@@ -475,7 +480,7 @@ def handle_status(args):
     try:
         toolkit = _make_toolkit(args)
         toolkit.verbose_status()
-        exit(os.EX_OK)
+        exit(sysexits.EX_OK)
     except Exception as e:
         _exit_for_exception(e)
 
@@ -493,7 +498,7 @@ def handle_flash_application(args):
             toolkit.APPLICATION_BINARY_OFFSET,
             MAX_FLASH_ATTEMPTS
         ):
-            exit(os.EX_SOFTWARE)
+            exit(sysexits.EX_SOFTWARE)
     except Exception as e:
         _exit_for_exception(e)
 
@@ -504,7 +509,7 @@ def handle_flash_bitstream(args):
         file_data = open_and_pad_file(args.bs_path, args.p)
         if not confirm_action():
             print("Aborting.")
-            exit(os.EX_USAGE)
+            exit(sysexits.EX_USAGE)
         print("Stopping the Signaloid SoC...")
         toolkit.apply_configure_action("core-stop", lambda: True)
         print("Unlocking the bitstream section...")
@@ -518,7 +523,7 @@ def handle_flash_bitstream(args):
         print("Locking the bitstream section...")
         toolkit.lock_bitstream()
         if not flashed:
-            exit(os.EX_SOFTWARE)
+            exit(sysexits.EX_SOFTWARE)
     except Exception as e:
         _exit_for_exception(e)
 
@@ -534,7 +539,7 @@ def handle_configuration(args):
             toolkit.apply_configure_action(args.action, confirm_action)
     except UnsupportedConfigureAction as e:
         print(f"Error: {e}", file=sys.stderr)
-        exit(os.EX_USAGE)
+        exit(sysexits.EX_USAGE)
     except Exception as e:
         _exit_for_exception(e)
 

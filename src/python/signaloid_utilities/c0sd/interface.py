@@ -57,6 +57,8 @@ SIGNALOID_SOC_STATUS_INVALID_COMMAND = 3
 BITSTREAM_UNLOCK_KEY = 0x4B4C4E55
 BITSTREAM_UNLOCK_KEY_BYTES = b"UNLK"
 IDENTITY_SIZE = 8
+# TRAP_MCAUSE holds this until the core records a trap.
+NO_TRAP_MCAUSE = 0xFFFFFFFF
 
 
 def identity_tag_is_blank(tag: bytes) -> bool:
@@ -161,6 +163,40 @@ class SoCRunning(Exception):
         )
 
 
+class CoreStopped(Exception):
+    """Raised when the SoC core stops or traps while a command calculates.
+
+    The trap handler resets the core but leaves STATUS at CALCULATING, so
+    without this the host would wait for ever.
+    """
+
+    def __init__(self, mcause: int, mepc: int, mtval: int) -> None:
+        self.mcause = mcause
+        self.mepc = mepc
+        self.mtval = mtval
+        if mcause == NO_TRAP_MCAUSE:
+            trap = "no trap is recorded"
+        else:
+            trap = (
+                f"last recorded trap: MCAUSE {mcause}, MEPC {mepc:#010x}, "
+                f"MTVAL {mtval:#010x}"
+            )
+        super().__init__(
+            f"the SoC core stopped while calculating a command ({trap})."
+        )
+
+
+class CommandTimeout(Exception):
+    """Raised when a command is still calculating when its timeout expires."""
+
+    def __init__(self, command: int, timeout: float) -> None:
+        self.command = command
+        self.timeout = timeout
+        super().__init__(
+            f"command {command} did not finish within {timeout} s."
+        )
+
+
 class BitstreamUnlockFailed(Exception):
     """Raised when the bitstream section could not be unlocked.
 
@@ -198,6 +234,13 @@ class C0SDBaseInterface:
     COMMAND_REGISTER_OFFSET: int = 0
     CONFIG_REGISTER_OFFSET: int = 0
     STATUS_REGISTER_OFFSET: int = 0
+    TRAP_MCAUSE_REGISTER_OFFSET: int = 0
+
+    # A block that reads as zeros with OKAY bus responses. The block
+    # device reads and discards it to absorb the stale block that
+    # signaloid/project-roger-sd-interface-rtl-issues#33 can leave behind
+    # (see UnbufferedBlockDevice). None turns this off.
+    SACRIFICIAL_READ_OFFSET: Optional[int] = None
 
     MMIO_BUFFER_SIZE_BYTES: int = 8192
     MMIO_BUFFER_OFFSET: int = 0
@@ -377,7 +420,10 @@ class C0SDBaseInterface:
         """
         from ..common.raw_block_device import UnifiedBlockDevice
 
-        return UnifiedBlockDevice(path=target_device)
+        return UnifiedBlockDevice(
+            path=target_device,
+            sacrificial_offset=self.SACRIFICIAL_READ_OFFSET,
+        )
 
     def _read(self, offset: int, size: int) -> bytes:
         return self.device.read(offset=offset, length=size)
@@ -543,6 +589,20 @@ class C0SDBaseInterface:
         buffer = self._read(self.STATUS_REGISTER_OFFSET, 4)
         return struct.unpack("<I", buffer)[0]
 
+    def get_trap_status(self) -> Tuple[int, int, int]:
+        """Read the trap registers (mcause, mepc, mtval) in one transaction.
+
+        The three registers are contiguous in the memory map, so they are
+        read together as a single packed 12-byte block rather than with
+        three separate transactions.
+
+        Returns:
+            Tuple in order (mcause, mepc, mtval). ``mcause`` is
+            ``NO_TRAP_MCAUSE`` when no trap has been recorded.
+        """
+        buffer = self._read(self.TRAP_MCAUSE_REGISTER_OFFSET, 12)
+        return struct.unpack("<III", buffer)
+
     def calculate_command(
             self,
             command: int,
@@ -551,18 +611,50 @@ class C0SDBaseInterface:
             skip_MMIO_buffer_read: bool = False,
             verbose: bool = True,
             timeout_waiting_to_start: float = 0.5,
+            timeout: Optional[float] = None,
     ) -> bytes:
+        """Run ``command`` on the SoC and wait for it to finish.
+
+        Args:
+            timeout: Seconds to wait for the command to finish, or None to
+                wait for as long as the core keeps running.
+
+        Raises:
+            CoreStopped: if the core stops or traps while calculating.
+            CommandTimeout: if ``timeout`` expires while calculating.
+        """
         data_buffer = None
 
+        # The trap registers keep an earlier trap until the SoC resets, so
+        # only a change from this snapshot is a new trap.
+        trap_before = self.get_trap_status()
         self.set_command(command)
         if verbose:
             print("Waiting for calculation to finish.", end="")
 
-        start_time = time.time()
+        start_time = time.monotonic()
         while True:
             soc_status = self.get_status()
 
             if soc_status == SIGNALOID_SOC_STATUS_CALCULATING:
+                # A trap resets the core but leaves STATUS at CALCULATING.
+                # CONFIG is read first: the trap handler records the trap
+                # before it resets the core.
+                running = self.soc_is_running()
+                trap = self.get_trap_status()
+                if not running or trap != trap_before:
+                    # Withdraw the command, so that restarting the core
+                    # does not run it again.
+                    self.set_command(idle_command)
+                    raise CoreStopped(*trap)
+                if (
+                    timeout is not None
+                    and time.monotonic() - start_time > timeout
+                ):
+                    # Withdraw the command, so that the core returns to
+                    # waiting once it finishes.
+                    self.set_command(idle_command)
+                    raise CommandTimeout(command, timeout)
                 if verbose:
                     print(".", end="")
                 time.sleep(poll_sleep_time)
@@ -579,7 +671,7 @@ class C0SDBaseInterface:
                     print("\nERROR: Device returned 'Unknown CMD'\n")
                 break
             elif soc_status == SIGNALOID_SOC_STATUS_WAIT_FOR_COMMAND:
-                if time.time() - start_time < timeout_waiting_to_start:
+                if time.monotonic() - start_time < timeout_waiting_to_start:
                     continue
 
                 if verbose:
@@ -844,6 +936,10 @@ class C0microSDPlusInterface(SDConfigRegisterMixin, C0SDBaseInterface):
         self.TRAP_MTVAL_REGISTER_OFFSET = csr.TrapMtval.ADDR
         self.BITSTREAM_UNLOCK_REGISTER_OFFSET = csr.BitstreamUnlock.ADDR
 
+        # 512 bytes past CONFIG: unmapped words of the CSR block, which
+        # read as zeros (DEFAULT_RDATA) with OKAY responses.
+        self.SACRIFICIAL_READ_OFFSET = csr.Config.ADDR + 0x200
+
         self.MMIO_BUFFER_OFFSET = top.IoBuff.BOTTOM_ENTRY
         self.MMIO_BUFFER_SIZE_BYTES = top.IoBuff.SIZE_BYTES
 
@@ -989,16 +1085,6 @@ class C0microSDPlusInterface(SDConfigRegisterMixin, C0SDBaseInterface):
             value = (value & ~mask) | ((1 if field else 0) << bit)
         self.set_config_register(value)
 
-    def get_trap_status(self) -> Tuple[int, int, int]:
-        """Read the trap registers (mcause, mepc, mtval) in one transaction.
-
-        The three registers are contiguous in the memory map, so they are read
-        together as a single packed 12-byte block. Returns (mcause, mepc,
-        mtval); mcause is 0xFFFFFFFF when no trap has been recorded.
-        """
-        buffer = self._read(self.TRAP_MCAUSE_REGISTER_OFFSET, 12)
-        return struct.unpack("<III", buffer)
-
 
 class C0SDInterface(SDConfigRegisterMixin, C0SDBaseInterface):
     """Interface for the C0-SD variant.
@@ -1036,6 +1122,10 @@ class C0SDInterface(SDConfigRegisterMixin, C0SDBaseInterface):
         self.TRAP_MEPC_REGISTER_OFFSET = csr.TrapMepc.ADDR
         self.TRAP_MTVAL_REGISTER_OFFSET = csr.TrapMtval.ADDR
         self.BITSTREAM_UNLOCK_REGISTER_OFFSET = csr.BitstreamUnlock.ADDR
+
+        # 512 bytes past CONFIG: unmapped words of the CSR block, which
+        # read as zeros (DEFAULT_RDATA) with OKAY responses.
+        self.SACRIFICIAL_READ_OFFSET = csr.Config.ADDR + 0x200
 
         self.MMIO_BUFFER_OFFSET = top.IoBuff.BOTTOM_ENTRY
         self.MMIO_BUFFER_SIZE_BYTES = top.IoBuff.SIZE_BYTES
@@ -1145,20 +1235,6 @@ class C0SDInterface(SDConfigRegisterMixin, C0SDBaseInterface):
             value = (value & ~mask) | ((1 if field else 0) << bit)
         self.set_config_register(value)
 
-    def get_trap_status(self) -> Tuple[int, int, int]:
-        """Read the trap registers (mcause, mepc, mtval) in one transaction.
-
-        The three registers are contiguous in the memory map, so they are
-        read together as a single packed 12-byte block rather than with
-        three separate transactions.
-
-        Returns:
-            Tuple in order (mcause, mepc, mtval). ``mcause`` is
-            ``0xFFFFFFFF`` when no trap has been recorded.
-        """
-        buffer = self._read(self.TRAP_MCAUSE_REGISTER_OFFSET, 12)
-        return struct.unpack("<III", buffer)
-
     def verbose_status(self) -> None:
         """Extend the report with the trap registers (mcause/mepc/mtval).
 
@@ -1171,7 +1247,7 @@ class C0SDInterface(SDConfigRegisterMixin, C0SDBaseInterface):
         super().verbose_status()
 
         mcause, mepc, mtval = self.get_trap_status()
-        if mcause != 0xFFFFFFFF:
+        if mcause != NO_TRAP_MCAUSE:
             print("\nA trap has occurred:")
             print(f"{'MCAUSE':>9}: {mcause}")
             print(f"{'MEPC':>9}: {mepc:#010x}")
