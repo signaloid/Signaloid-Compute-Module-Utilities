@@ -77,7 +77,7 @@ any additional libraries. The program's command-line arguments and usage example
 usage: C0_SD_toolkit.py [-h] [--variant {C0-microSD+,C0-SD}] [--regmap-path REGMAP_PATH]
                         target_device <command> ...
 
-Signaloid C0-SD toolkit. Version 2.5
+Signaloid C0-SD toolkit. Version <version>
 
 positional arguments:
   target_device         Target device path
