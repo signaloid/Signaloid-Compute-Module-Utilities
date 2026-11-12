@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
 
 from signaloid_utilities.common import sysexits
+from signaloid_utilities.common.version import package_version
 from signaloid_utilities.c0sd.interface import (
     C0SDBaseInterface,
     C0microSDPlusInterface,
@@ -40,7 +41,6 @@ from signaloid_utilities.c0sd.interface import (
     identity_tag_is_blank,
 )
 
-APP_VERSION = "2.5"  # Application version
 MAX_FLASH_ATTEMPTS = 5  # Maximum flashing attempts
 
 # Known bitstream-metadata keys and their display labels, in print order.
@@ -567,15 +567,16 @@ _COMMAND_DESCRIPTIONS: list[tuple[str, str]] = [
 def _config_actions_for(variant: str) -> list[tuple[str, bool]]:
     """Return the sorted ``(action, needs_confirmation)`` list for a variant.
 
-    Constructs the variant toolkit with a placeholder device path purely
-    to read its ``SUPPORTED_ACTIONS`` table; no device I/O happens at
-    construction time.
+    ``SUPPORTED_ACTIONS`` is built in ``__init__`` from the regmap (the class
+    attribute is empty), so this constructs the variant toolkit with a
+    placeholder path and an ``_open_device`` that opens nothing.
     """
-    toolkit = _toolkit_cls_for(variant)
-    return [
-        (name, bool(toolkit.SUPPORTED_ACTIONS[name][3]))
-        for name in sorted(toolkit.SUPPORTED_ACTIONS)
-    ]
+    toolkit_cls = _toolkit_cls_for(variant)
+    probe_cls = type(
+        "_HelpProbe", (toolkit_cls,), {"_open_device": lambda self, path: None}
+    )
+    actions = probe_cls("<none>").SUPPORTED_ACTIONS
+    return [(name, bool(actions[name][3])) for name in sorted(actions)]
 
 
 def _format_config_actions(selected_variant: Optional[str]) -> str:
@@ -609,7 +610,7 @@ def _build_epilog(selected_variant: Optional[str]) -> str:
 
 def create_parser(selected_variant: Optional[str] = None):
     parser = argparse.ArgumentParser(
-        description=f"Signaloid C0-SD toolkit. Version {APP_VERSION}",
+        description=f"Signaloid C0-SD toolkit. Version {package_version()}",
         epilog=_build_epilog(selected_variant),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=True

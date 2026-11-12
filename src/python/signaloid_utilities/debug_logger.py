@@ -45,6 +45,7 @@ from signaloid_utilities.c0sd.interface import (
     C0microSDPlusInterface,
     C0SDInterface,
 )
+from signaloid_utilities.c0sd.toolkit import _exit_for_exception
 
 
 VARIANT_TO_INTERFACE_CLASS: dict[str, type] = {
@@ -401,7 +402,11 @@ def main(explicit_args: list[str] | None = None):
     args = parse_arguments(explicit_args)
 
     compute_module_class = VARIANT_TO_INTERFACE_CLASS[args.variant]
-    compute_module = compute_module_class(args.device_path)
+    try:
+        compute_module = compute_module_class(args.device_path)
+    except Exception as e:
+        # Same message and sysexits code as the toolkits, instead of a traceback.
+        _exit_for_exception(e)
     if args.reset_on_launch:
         if isinstance(
             compute_module,

@@ -26,13 +26,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
 
 from signaloid_utilities.sddev.sddev import SDDevController
-
-APP_VERSION = "0.1"  # Application version
+from signaloid_utilities.common.version import package_version
 
 
 def main(explicit_args: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description=f"Signaloid SD_Dev_toolkit. Version {APP_VERSION}",
+        description=f"Signaloid SD_Dev_toolkit. Version {package_version()}",
         add_help=False
     )
 

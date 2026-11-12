@@ -72,7 +72,7 @@ firmware. The script uses only Python standard libraries. Following are the prog
 usage: C0_microSD_toolkit.py [-h] -t TARGET_DEVICE [-b INPUT_FILE] [-p PAD_SIZE]
                              [-u | -U | -q | -w | -s | -i | -y] [-f]
 
-Signaloid C0-microSD-toolkit. Version 2.0
+Signaloid C0-microSD-toolkit. Version <version>
 
 options:
   -h, --help        Show this help message and exit.

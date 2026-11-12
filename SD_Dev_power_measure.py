@@ -28,8 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
 
 from signaloid_utilities.sddev.sddev import SDDevADCInterface
-
-APP_VERSION = "0.1"  # Application version
+from signaloid_utilities.common.version import package_version
 
 
 def sigint_handler(signal, frame):
@@ -43,7 +42,7 @@ def main(explicit_args: list[str] | None = None):
     signal.signal(signal.SIGINT, sigint_handler)
 
     parser = argparse.ArgumentParser(
-        description=f"Signaloid SD_Dev_power_measure. Version {APP_VERSION}",
+        description=f"Signaloid SD_Dev_power_measure. Version {package_version()}",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         add_help=False
     )

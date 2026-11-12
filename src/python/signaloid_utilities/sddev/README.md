@@ -63,7 +63,7 @@ You can use the `SD_Dev_toolkit.py` to detect and power-cycle the SD cards on-bo
 ```
 usage: SD_Dev_toolkit.py [-h] [-p] [-v]
 
-Signaloid SD_Dev_toolkit. Version 0.1
+Signaloid SD_Dev_toolkit. Version <version>
 
 options:
   -h, --help         Show this help message and exit.
@@ -79,7 +79,7 @@ Installation above.
 ```
 usage: SD_Dev_power_measure.py [-h] [-s SMBUS_NUMBER] [-o OUTPUT_FILENAME] [-c {0,1}] [-g {1,2,4,8}] [-r {12,14,16}]
 
-Signaloid SD_Dev_power_measure. Version 0.1
+Signaloid SD_Dev_power_measure. Version <version>
 
 options:
   -h, --help            Show this help message and exit.

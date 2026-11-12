@@ -29,13 +29,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src" / "python"))
 
 from signaloid_utilities.common import sysexits
+from signaloid_utilities.common.version import package_version
 from signaloid_utilities.c0microsd.interface import C0microSDInterface
 from signaloid_utilities.c0microsd.constants import BOOTLOADER_CONSTANTS
 from signaloid_utilities.common.bitstream_prefix import (
     find_json_object,
 )
 
-APP_VERSION = "2.0"  # Application version
 MAX_FLASH_ATTEMPTS = 5  # Maximum flashing attempts
 
 
@@ -352,7 +352,7 @@ def parse_size(size_str):
 
 def main(explicit_args: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description=f"Signaloid C0-microSD-toolkit. Version {APP_VERSION}",
+        description=f"Signaloid C0-microSD-toolkit. Version {package_version()}",
         add_help=False
     )
 
